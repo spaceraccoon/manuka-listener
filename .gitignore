@@ -22,5 +22,5 @@ harvester/cached_message_ids.pickle
 harvester/token.pickle
 
 # python related files
-harvester/__pycache__/*
+harvester/__pycache__/*.pyc
 harvester/*.pyc
