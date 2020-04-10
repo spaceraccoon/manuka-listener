@@ -16,3 +16,11 @@
 
 # Built binary
 manuka-listener
+
+harvester/credentials.json
+harvester/cached_message_ids.pickle
+harvester/token.pickle
+
+# python related files
+__pycache__/*
+harvester/*.pyc
