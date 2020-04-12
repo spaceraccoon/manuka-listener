@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-from email_helper import is_intelligence, analyze_intelligence_source
+from email_helper import analyze_email_message
 import pickle
 import os.path
 import json
@@ -33,31 +33,43 @@ def load_credentials():
     return creds
 
 def analyze_emails(credentials, cache_message_ids_pickle_file):
-    analyzed_message_ids = retrieve_cache_message_ids(cache_message_ids_pickle_file)
+    cached_data_store = retrieve_cache_messages(cache_message_ids_pickle_file)
     service = build('gmail', 'v1', credentials=credentials)
     results = service.users().messages().list(userId='me').execute()
+    print("Retrieved %s emails from Google Mailbox - manuka.bee.harvester.1@gmail.com" % str(len(results['messages'])))
     for message in results['messages']:
-        if message['id'] not in analyzed_message_ids:
-            message = service.users().messages().get(userId='me', id=message['id'],format='raw').execute()
-            if is_intelligence(message['snippet']):
-                ioi = analyze_intelligence_source(message)
+        if message['id'] not in cached_data_store['ids']:
+            message = service.users().messages().get(userId='me', id=message['id']).execute()
+            # try:
+            ioi = analyze_email_message(message)
+            
+            if ioi:
+                sha256_hash = ioi.sha256_hash
+                if sha256_hash not in cached_data_store['hashes']:
+                    cached_data_store['hashes'][sha256_hash] = [message['id']]
+                else:
+                    # print("Message[\"%s\"] is found to contain duplicated content" % message['id'])
+                    ioi.add_duplicates(cached_data_store['hashes'][sha256_hash])
+                    cached_data_store['hashes'][sha256_hash].append(message['id'])
+                # send to backend for processing
                 print(ioi.toJSON())
-                # send to backend
-                analyzed_message_ids.append(message['id'])
-    cache_message_ids(cache_message_ids_pickle_file, analyzed_message_ids)
+            cached_data_store['ids'].append(message['id'])
+    cache_messages(cache_message_ids_pickle_file, cached_data_store)
 
-def cache_message_ids(pickle_file, ids):
+def cache_messages(pickle_file, cached_data_store):
     with open(pickle_file, 'wb') as output_pickle_file:
-            pickle.dump(ids, output_pickle_file)
-    print("Cached %s message IDs" %(str(len(ids))))
+            pickle.dump(cached_data_store, output_pickle_file)
+    print("Cached %s messages" %(str(len(cached_data_store['ids']))))
 
-def retrieve_cache_message_ids(pickle_file):
-    ids = []
+def retrieve_cache_messages(pickle_file):
     if os.path.exists(pickle_file):
         with open(pickle_file, 'rb') as output_pickle_file:
-            ids = pickle.load(output_pickle_file)
-    print("Retrieved cached %s message IDs" %(str(len(ids))))
-    return ids
+            cached_data_store = pickle.load(output_pickle_file)
+            if cached_data_store is not None:
+                print("Retrieved cached %s cached messages" %(str(len(cached_data_store['ids']))))
+                return cached_data_store
+    print("Retrieved cached 0 cached messages")
+    return {'ids':[], 'hashes':{}}
 
 def dump_obj(obj_to_dump):
     print(json.dumps(obj_to_dump,indent=4))
