@@ -17,6 +17,8 @@
 # Built binary
 manuka-listener
 
+*.json
+
 harvester/credentials.json
 harvester/cached_message_ids.pickle
 harvester/token.pickle
