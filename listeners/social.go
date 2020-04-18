@@ -1,6 +1,7 @@
 package listeners
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,10 +12,12 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/spaceraccoon/manuka-server/models"
 
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
@@ -25,6 +28,35 @@ import (
 type MessagesCache struct {
 	Ids    map[string]bool     `json:"ids"`
 	Hashes map[string][]string `json:"hashes"`
+}
+
+type SimpleAcknowledgementReponse struct {
+	Message string `json:"message"`
+}
+
+type IntelligenceIndicators struct {
+	Subject  string         `json:"subject_re"`
+	Content  string         `json:"content_re"`
+	From     string         `json:"from_email"`
+	Event    string         `json:"event"`
+	Platform string         `json:"platform"`
+	HitType  models.HitType `json:"hitType"`
+}
+
+type IndicatorOfInterest struct {
+	ListenerID   int                 `json:"listener_id"`
+	ListenerType models.ListenerType `json:"listener_type"`
+	HitType      models.HitType      `json:"hit_type"`
+	Email        string              `json:"email"`
+	Sha256_hash  string              `json:"sha256_hash"`
+}
+
+type ListenerHit struct {
+	ListenerID   int                 `json:"listenerId"`
+	ListenerType models.ListenerType `json:"listenerType"`
+	IPAddress    string              `json:"ipAddress"`
+	Email        string              `json:"email"`
+	HitType      models.HitType      `json:"hitType"`
 }
 
 func readMessagesCache(outputFile string) MessagesCache {
@@ -50,53 +82,53 @@ func dumpMessagesCache(messagesCache MessagesCache, outputFile string) {
 	}
 }
 
-type IntelligenceIndicators struct {
-	Subject  string `json:"subject_re"`
-	Content  string `json:"content_re"`
-	From     string `json:"from_email"`
-	Event    string `json:"event"`
-	Platform string `json:"platform"`
-}
-
-type IndicatorOfInterest struct {
-	Listener_id int    `json:"listener_id"`
-	Source_id   int    `json:"source_id"`
-	Description string `json:"description"`
-	Email       string `json:"email"`
-	Sha256_hash string `json:"sha256_hash"`
-}
-
 var intelligenceIndicators []IntelligenceIndicators
+var messagesCacheFile string = os.Getenv("MESSAGES_CACHE_FILE")
+var companyName string = os.Getenv("COMPANY_NAME")
+var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
+var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
+var listenerID int = convertStrToInt("LISTENER_ID")
+var listenerType int = convertStrToInt("LISTENER_TYPE")
+
+func convertStrToInt(envStr string) int {
+	id, err := strconv.Atoi(os.Getenv(envStr))
+	if err != nil {
+		log.Fatalf("Unable to retrieve listener-related environment variable: %v", err)
+	}
+	return id
+}
 
 func init() {
 	intelligenceIndicators = []IntelligenceIndicators{
-		IntelligenceIndicators{
+		{
 			Subject:  "^.*, please add me to your LinkedIn network$",
 			Content:  "^Hi.*, I&#39;d like to join your LinkedIn network\\. LinkedIn.*, I&#39;d like to join your LinkedIn network\\. .*$",
 			From:     "invitations@linkedin.com",
 			Event:    "attempted_network_connection",
+			HitType:  models.LinkedInRequest,
 			Platform: "LINKEDIN"},
-		IntelligenceIndicators{
+		{
 			Subject:  "^.*, start a conversation with your new connection, .*$",
 			Content:  "^See.*connections, experience, and more LinkedIn.*has accepted your invitation\\. Let&#39;s start a conversation\\..*$",
 			From:     "invitations@linkedin.com",
 			Event:    "successful_network_connection",
+			HitType:  models.LinkedInMessage,
 			Platform: "LINKEDIN"},
-		IntelligenceIndicators{
+		{
 			Subject:  "^.*wants to be friends on Facebook$",
 			Content:  "^.*wants to be friends with you on Facebook\\..*Confirm request Facebook.*wants to be friends with you on Facebook.*Confirm request See all requests.*$",
 			From:     "notification@facebookmail.com",
 			Event:    "attempted_network_connection",
+			HitType:  models.FacebookRequest,
 			Platform: "FACEBOOK"},
 	}
 }
 
 func getClient(config *oauth2.Config) *http.Client {
-	tokFile := "token.json"
-	tok, err := tokenFromFile(tokFile)
+	tok, err := tokenFromFile(googleOauth2TokenFile)
 	if err != nil {
 		tok = getTokenFromWeb(config)
-		saveToken(tokFile, tok)
+		saveToken(googleOauth2TokenFile, tok)
 	}
 	return config.Client(context.Background(), tok)
 }
@@ -179,92 +211,111 @@ func analyzeEmail(emailMessage *gmail.Message) (IndicatorOfInterest, error) {
 	content := emailMessage.Snippet
 	for _, indicator := range intelligenceIndicators {
 		if matchFormat(subject, indicator.Subject) && fromEmail == indicator.From && matchFormat(content, indicator.Content) {
-			return IndicatorOfInterest{Listener_id: 1, Source_id: 1, Description: indicator.Event, Email: email, Sha256_hash: generateSha256Hash(indicator.Platform, email, indicator.Event, subject, content)}, nil
+			return IndicatorOfInterest{ListenerID: listenerID, ListenerType: models.ListenerType(listenerType), HitType: indicator.HitType, Email: email, Sha256_hash: generateSha256Hash(indicator.Platform, email, indicator.Event, subject, content)}, nil
 		}
 	}
-	return IndicatorOfInterest{Listener_id: 1, Source_id: 1, Description: "N.A", Email: email, Sha256_hash: ""}, errors.New("Email does not contain intelligence")
+	return IndicatorOfInterest{ListenerID: 0, ListenerType: 0, HitType: 0, Email: "", Sha256_hash: ""}, errors.New("Email does not contain intelligence")
 }
 
-func harvest() MessagesCache {
-	b, err := ioutil.ReadFile("/run/secrets/credentials.json")
+func initGmailService() (*gmail.Service, error) {
+	// b, err := ioutil.ReadFile("/run/secrets/credentials.json")
+	b, err := ioutil.ReadFile(googleCredentialsFile)
 	if err != nil {
 		log.Fatalf("Unable to read client secret file: %v", err)
 	}
-
 	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
 	if err != nil {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
 	client := getClient(config)
-
 	srv, err := gmail.New(client)
 	if err != nil {
 		log.Fatalf("Unable to retrieve Gmail client: %v", err)
 	}
-	messagsCacheFile := "messages_cache.json"
-	messagesCache := readMessagesCache(messagsCacheFile)
-
-	user := "me"
-	r, err := srv.Users.Messages.List(user).Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve emails: %v", err)
-	}
-	if len(r.Messages) == 0 {
-		fmt.Println("No emails found.")
-		return MessagesCache{Ids: make(map[string]bool), Hashes: make(map[string][]string)}
-	}
-	for _, message := range r.Messages {
-		cachedId := messagesCache.Ids[message.Id]
-		if cachedId == false {
-			messagesCache.Ids[message.Id] = true
-			messageResponse, messageResponseError := srv.Users.Messages.Get(user, message.Id).Do()
-			if messageResponseError != nil {
-				log.Fatalf("Unable to retrieve message: %v", messageResponseError)
-			}
-			indicator, analysisError := analyzeEmail(messageResponse)
-			if analysisError != nil {
-				fmt.Printf("Message %s does not contain Intelligence\n", message.Id)
-				continue
-			}
-			jsonObj, jsonConversionErr := json.Marshal(&indicator)
-			if jsonConversionErr != nil {
-				fmt.Println(jsonConversionErr)
-				return MessagesCache{Ids: make(map[string]bool), Hashes: make(map[string][]string)}
-			}
-			hashes := messagesCache.Hashes[indicator.Sha256_hash]
-			// Do something here to send the intelligence object to a endpoint
-			// To discuss with the team on the action taken if a similar intelligence is found
-			if len(hashes) > 0 {
-				fmt.Println("Similar hash value found")
-			}
-			messagesCache.Hashes[indicator.Sha256_hash] = append(hashes, message.Id)
-			fmt.Println(string(jsonObj))
-		}
-
-	}
-	dumpMessagesCache(messagesCache, messagsCacheFile)
-	return messagesCache
+	return srv, err
 }
 
-func main() {
-	// harvest to run a check with all the emails inside the inbox
-	harvest()
-	messagesCacheFile := "messages_cache.json"
-	r := gin.Default()
-	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
+// LoginRoutes defines the routes for the login listener
+func SocialRoutes(r *gin.Engine) {
+
+	user := "me"
+
+	r.GET("/", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "login.html", gin.H{
+			"companyName": companyName,
 		})
 	})
 	r.GET("/harvest", func(c *gin.Context) {
-		// Consider making this an asynchronious task
-		// returns a job id
-		messagesCache := harvest()
-		c.JSON(http.StatusOK, messagesCache)
+		srv, err := initGmailService()
+		r, err := srv.Users.Messages.List(user).Do()
+		if err != nil {
+			log.Fatalf("Unable to retrieve emails: %v", err)
+		}
+		if len(r.Messages) > 0 {
+			messagesCache := readMessagesCache(messagesCacheFile)
+			for _, message := range r.Messages {
+				cachedId := messagesCache.Ids[message.Id]
+				if cachedId == false {
+					messagesCache.Ids[message.Id] = true
+					messageResponse, messageResponseError := srv.Users.Messages.Get(user, message.Id).Do()
+					if messageResponseError != nil {
+						log.Fatalf("Unable to retrieve message: %v", messageResponseError)
+					}
+					indicator, analysisError := analyzeEmail(messageResponse)
+					if analysisError != nil {
+						fmt.Printf("Message %s does not contain Intelligence\n", message.Id)
+						continue
+					}
+					jsonObj, jsonConversionErr := json.Marshal(&indicator)
+					if jsonConversionErr != nil {
+						fmt.Println(jsonConversionErr)
+					}
+					hashes := messagesCache.Hashes[indicator.Sha256_hash]
+					// Do something here to send the intelligence object to a endpoint
+					// To discuss with the team on the action taken if a similar intelligence is found
+					if len(hashes) > 0 {
+						fmt.Println("Similar hash value found")
+					} else {
+						// Since its unique, send back to backend
+						loginHit := ListenerHit{
+							ListenerID:   listenerID,
+							ListenerType: models.ListenerType(listenerType),
+							IPAddress:    c.ClientIP(),
+							Email:        indicator.Email,
+							HitType:      indicator.HitType,
+						}
+						loginHitJSON, err := json.Marshal(loginHit)
+						if err != nil {
+							log.Fatalf("Unable to convert to json object: %v", err)
+						}
+						_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginHitJSON))
+						if err != nil {
+							log.Fatalf("Unable to send to backend server: %v", err)
+						}
+					}
+					messagesCache.Hashes[indicator.Sha256_hash] = append(hashes, message.Id)
+					fmt.Println(string(jsonObj))
+				}
+			}
+			dumpMessagesCache(messagesCache, messagesCacheFile)
+		} else {
+			// if no email found, do not continue any further
+			fmt.Println("No emails found.")
+		}
+		response := SimpleAcknowledgementReponse{Message: "OK"}
+		c.JSON(http.StatusOK, response)
 	})
 	r.GET("/cache", func(c *gin.Context) {
 		messagesCache := readMessagesCache(messagesCacheFile)
 		c.JSON(http.StatusOK, messagesCache)
 	})
-	r.Run(":3002")
+	r.GET("/clear_cache", func(c *gin.Context) {
+		err := os.Remove(messagesCacheFile)
+		response := SimpleAcknowledgementReponse{Message: "OK"}
+		if err != nil {
+			log.Fatalf("Unable to clear messages cache: %v", err)
+			response.Message = "FAILED"
+		}
+		c.JSON(http.StatusOK, response)
+	})
 }

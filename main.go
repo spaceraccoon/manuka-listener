@@ -21,6 +21,8 @@ func main() {
 	switch models.ListenerType(listenerTypeInt) {
 	case models.LoginListener:
 		listeners.LoginRoutes(r)
+	case models.SocialListener:
+		listeners.SocialRoutes(r)
 	default:
 		log.Fatal("Environment variable LISTENER_TYPE must be one of login, social")
 	}
