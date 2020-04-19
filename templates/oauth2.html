@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <link rel="icon" href="/docs/4.0/assets/img/favicons/favicon.ico">
+
+    <title>Generate OAuth2 Token</title>
+</head>
+
+<body>
+    <h4>Step 1 - Authorise the app with the Collector's gmail account</h4>
+    <p>Click on the following link to perform the authorisation</p>
+    <a href="{{ .oauth2Link }}" target="_blank">Authorise</a>
+    <br>
+    <h4>Step 2 - Post the given authorisation code</h4>
+    <form class="form-signin" action="/init_oauth2" method="post">
+        <label for="oauth2_code" class="sr-only">OAuth2 Code</label>
+        <input type="text" id="oauth2_code" class="form-control" placeholder="OAuth2 Authorisation Code" name="oauth2_code" required>
+        <div class="checkbox mb-3">
+        </div>
+        <button class="btn btn-lg btn-primary btn-block" type="submit">Authorise</button>
+    </form>
+</body>
+    
+</html>

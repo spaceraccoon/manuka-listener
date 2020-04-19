@@ -32,6 +32,7 @@ type MessagesCache struct {
 
 type SimpleAcknowledgementReponse struct {
 	Message string `json:"message"`
+	Error   string `json:"error"`
 }
 
 type IntelligenceIndicators struct {
@@ -59,6 +60,19 @@ type ListenerHit struct {
 	HitType      models.HitType      `json:"hitType"`
 }
 
+type OAuth2Code struct {
+	OAuth2Code string `form:"oauth2_code"`
+}
+
+var intelligenceIndicators []IntelligenceIndicators
+var messagesCacheFile string = os.Getenv("MESSAGES_CACHE_FILE")
+var companyName string = os.Getenv("COMPANY_NAME")
+var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
+var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
+var listenerID int = convertStrToInt("LISTENER_ID")
+var listenerType int = convertStrToInt("LISTENER_TYPE")
+var user string = "me"
+
 func readMessagesCache(outputFile string) MessagesCache {
 	resultCache := MessagesCache{}
 	file, fileReadError := ioutil.ReadFile(outputFile)
@@ -81,14 +95,6 @@ func dumpMessagesCache(messagesCache MessagesCache, outputFile string) {
 		ioutil.WriteFile(outputFile, streamArr, 0644)
 	}
 }
-
-var intelligenceIndicators []IntelligenceIndicators
-var messagesCacheFile string = os.Getenv("MESSAGES_CACHE_FILE")
-var companyName string = os.Getenv("COMPANY_NAME")
-var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
-var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
-var listenerID int = convertStrToInt("LISTENER_ID")
-var listenerType int = convertStrToInt("LISTENER_TYPE")
 
 func convertStrToInt(envStr string) int {
 	id, err := strconv.Atoi(os.Getenv(envStr))
@@ -124,13 +130,12 @@ func init() {
 	}
 }
 
-func getClient(config *oauth2.Config) *http.Client {
+func getClient(config *oauth2.Config) (*http.Client, error) {
 	tok, err := tokenFromFile(googleOauth2TokenFile)
 	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(googleOauth2TokenFile, tok)
+		log.Fatalf("Unable to retrieve cached oauth2 token: %v", err)
 	}
-	return config.Client(context.Background(), tok)
+	return config.Client(context.Background(), tok), err
 }
 
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
@@ -218,7 +223,6 @@ func analyzeEmail(emailMessage *gmail.Message) (IndicatorOfInterest, error) {
 }
 
 func initGmailService() (*gmail.Service, error) {
-	// b, err := ioutil.ReadFile("/run/secrets/credentials.json")
 	b, err := ioutil.ReadFile(googleCredentialsFile)
 	if err != nil {
 		log.Fatalf("Unable to read client secret file: %v", err)
@@ -227,29 +231,79 @@ func initGmailService() (*gmail.Service, error) {
 	if err != nil {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
-	client := getClient(config)
+	client, err := getClient(config)
+	if err != nil {
+		log.Fatalf("Unable to set configurations for Gmail API client: %v", err)
+	}
 	srv, err := gmail.New(client)
 	if err != nil {
-		log.Fatalf("Unable to retrieve Gmail client: %v", err)
+		log.Fatalf("Unable to initialise Gmail client: %v", err)
 	}
 	return srv, err
 }
 
-// LoginRoutes defines the routes for the login listener
 func SocialRoutes(r *gin.Engine) {
-
-	user := "me"
-
-	r.GET("/", func(c *gin.Context) {
-		c.HTML(http.StatusOK, "login.html", gin.H{
-			"companyName": companyName,
+	r.GET("/init_oauth2", func(c *gin.Context) {
+		response := SimpleAcknowledgementReponse{Message: "FAILED", Error: "N.A"}
+		b, err := ioutil.ReadFile(googleCredentialsFile)
+		if err != nil {
+			log.Fatalf("Unable to read client secret file: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
+		if err != nil {
+			log.Fatalf("Unable to parse client secret file to config: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+		c.HTML(http.StatusOK, "oauth2.html", gin.H{
+			"oauth2Link": authURL,
 		})
+		return
+	})
+	r.POST("/init_oauth2", func(c *gin.Context) {
+		response := SimpleAcknowledgementReponse{Message: "FAILED", Error: "N.A"}
+		var oAuth2CodeJSON OAuth2Code
+		c.Bind(&oAuth2CodeJSON)
+		b, err := ioutil.ReadFile(googleCredentialsFile)
+		if err != nil {
+			log.Fatalf("Unable to read client secret file: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
+		if err != nil {
+			log.Fatalf("Unable to parse client secret file to config: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		oAuth2Token, err := config.Exchange(context.TODO(), oAuth2CodeJSON.OAuth2Code)
+		if err != nil {
+			log.Fatalf("Unable to retrieve token from web: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		saveToken(googleOauth2TokenFile, oAuth2Token)
+		response.Message = "OK"
+		c.JSON(http.StatusOK, response)
+		return
 	})
 	r.GET("/harvest", func(c *gin.Context) {
+		response := SimpleAcknowledgementReponse{Message: "FAILED", Error: "N.A"}
 		srv, err := initGmailService()
 		r, err := srv.Users.Messages.List(user).Do()
 		if err != nil {
 			log.Fatalf("Unable to retrieve emails: %v", err)
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
 		}
 		if len(r.Messages) > 0 {
 			messagesCache := readMessagesCache(messagesCacheFile)
@@ -302,20 +356,55 @@ func SocialRoutes(r *gin.Engine) {
 			// if no email found, do not continue any further
 			fmt.Println("No emails found.")
 		}
-		response := SimpleAcknowledgementReponse{Message: "OK"}
+		response.Message = "OK"
 		c.JSON(http.StatusOK, response)
+		return
 	})
 	r.GET("/cache", func(c *gin.Context) {
 		messagesCache := readMessagesCache(messagesCacheFile)
 		c.JSON(http.StatusOK, messagesCache)
+		return
 	})
 	r.GET("/clear_cache", func(c *gin.Context) {
-		err := os.Remove(messagesCacheFile)
-		response := SimpleAcknowledgementReponse{Message: "OK"}
-		if err != nil {
-			log.Fatalf("Unable to clear messages cache: %v", err)
+		response := SimpleAcknowledgementReponse{Message: "OK", Error: "N.A"}
+		if _, err := os.Stat(messagesCacheFile); err == nil {
+			err := os.Remove(messagesCacheFile)
+			if err != nil {
+				log.Fatalf("Unable to clear messages cache: %v", err)
+				response.Message = "FAILED"
+				response.Error = err.Error()
+				c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+				return
+			}
+		} else {
+			log.Fatalf("Messages cache file does not exists: %v", err)
 			response.Message = "FAILED"
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
 		}
 		c.JSON(http.StatusOK, response)
+		return
+	})
+	r.GET("/clear_oauth2_token", func(c *gin.Context) {
+		response := SimpleAcknowledgementReponse{Message: "OK", Error: "N.A"}
+		if _, err := os.Stat(googleOauth2TokenFile); err == nil {
+			err := os.Remove(googleOauth2TokenFile)
+			if err != nil {
+				log.Fatalf("Unable to clear OAuth2 token cache file: %v", err)
+				response.Message = "FAILED"
+				response.Error = err.Error()
+				c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+				return
+			}
+		} else {
+			log.Fatalf("OAuth2 token cache file does not exists: %v", err)
+			response.Message = "FAILED"
+			response.Error = err.Error()
+			c.AbortWithStatusJSON(http.StatusInternalServerError, response)
+			return
+		}
+		c.JSON(http.StatusOK, response)
+		return
 	})
 }
