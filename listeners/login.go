@@ -17,8 +17,8 @@ type Login struct {
 	Password string `form:"password"`
 }
 
-// LoginHit struct defines the hit data that is sent to the server
-type LoginHit struct {
+// LoginListenerHit struct defines the hit data that is sent to the server
+type LoginListenerHit struct {
 	ListenerID   int                 `json:"listenerId"`
 	ListenerType models.ListenerType `json:"listenerType"`
 	IPAddress    string              `json:"ipAddress"`
@@ -45,7 +45,7 @@ func LoginRoutes(r *gin.Engine) {
 		if err != nil {
 			c.AbortWithStatus(http.StatusInternalServerError)
 		}
-		loginHit := LoginHit{
+		loginListenerHit := LoginListenerHit{
 			ListenerID:   listenerID,
 			ListenerType: models.ListenerType(listenerTypeInt),
 			IPAddress:    c.ClientIP(),
@@ -53,11 +53,11 @@ func LoginRoutes(r *gin.Engine) {
 			Password:     login.Password,
 			HitType:      models.LoginAttempt,
 		}
-		loginHitJSON, err := json.Marshal(loginHit)
+		loginListenerHitJSON, err := json.Marshal(loginListenerHit)
 		if err != nil {
 			c.AbortWithStatus(http.StatusInternalServerError)
 		}
-		_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginHitJSON))
+		_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginListenerHitJSON))
 		if err != nil {
 			c.AbortWithStatus(http.StatusInternalServerError)
 		}

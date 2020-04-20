@@ -2,9 +2,7 @@ package listeners
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,11 +24,8 @@ import (
 	"google.golang.org/api/gmail/v1"
 )
 
-type SimpleAcknowledgementReponse struct {
-	Message string `json:"message"`
-}
-
-type IntelligenceIndicators struct {
+// IntelligenceIndicator struct defines matching templates for social email notifications
+type IntelligenceIndicator struct {
 	Subject  string         `json:"subject_re"`
 	Content  string         `json:"content_re"`
 	From     string         `json:"from_email"`
@@ -39,18 +34,10 @@ type IntelligenceIndicators struct {
 	HitType  models.HitType `json:"hitType"`
 }
 
-type IndicatorOfInterest struct {
-	ListenerID   int                 `json:"listener_id"`
-	ListenerType models.ListenerType `json:"listener_type"`
-	HitType      models.HitType      `json:"hit_type"`
-	Email        string              `json:"email"`
-	Sha256_hash  string              `json:"sha256_hash"`
-}
-
+// SocialListenerHit struct defines the hit data that is sent to the server
 type SocialListenerHit struct {
 	ListenerID   int                 `json:"listenerId"`
 	ListenerType models.ListenerType `json:"listenerType"`
-	IPAddress    string              `json:"ipAddress"`
 	Email        string              `json:"email"`
 	HitType      models.HitType      `json:"hitType"`
 }
@@ -83,18 +70,39 @@ type EmailNotification struct {
 	HistoryID    uint64 `json:"historyId"`
 }
 
-var GmailHistoryID uint64 // GmailHistoryID points to latest history ID retrieved
-var intelligenceIndicators []IntelligenceIndicators
-var companyName string = os.Getenv("COMPANY_NAME")
+var gmailHistoryID uint64 // gmailHistoryID points to latest history ID retrieved
 var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
 var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
-var listenerID int = convertStrToInt("LISTENER_ID")
-var listenerType int = convertStrToInt("LISTENER_TYPE")
 var topicFile string = os.Getenv("GOOGLE_TOPIC")
 
 const gmailExpiresIn uint64 = 3600
 
-func convertStrToInt(envStr string) int {
+var intelligenceIndicators []IntelligenceIndicator = []IntelligenceIndicator{
+	{
+		Subject:  "^.*, please add me to your LinkedIn network$",
+		Content:  "^Hi.*, I&#39;d like to join your LinkedIn network\\. LinkedIn.*, I&#39;d like to join your LinkedIn network\\. .*$",
+		From:     "invitations@linkedin.com",
+		Event:    "attempted_network_connection",
+		HitType:  models.LinkedInRequest,
+		Platform: "LINKEDIN"},
+	{
+		Subject:  "^.*, start a conversation with your new connection, .*$",
+		Content:  "^See.*connections, experience, and more LinkedIn.*has accepted your invitation\\. Let&#39;s start a conversation\\..*$",
+		From:     "invitations@linkedin.com",
+		Event:    "successful_network_connection",
+		HitType:  models.LinkedInMessage,
+		Platform: "LINKEDIN"},
+	{
+		Subject:  "^.*wants to be friends on Facebook$",
+		Content:  "^.*wants to be friends with you on Facebook\\..*Confirm request Facebook.*wants to be friends with you on Facebook.*Confirm request See all requests.*$",
+		From:     "notification@facebookmail.com",
+		Event:    "attempted_network_connection",
+		HitType:  models.FacebookRequest,
+		Platform: "FACEBOOK"},
+}
+
+// convertStrEnvToInt converts the envStr to an int
+func convertStrEnvToInt(envStr string) int {
 	id, err := strconv.Atoi(os.Getenv(envStr))
 	if err != nil {
 		log.Fatalf("Unable to retrieve listener-related environment variable: %v", err)
@@ -102,33 +110,7 @@ func convertStrToInt(envStr string) int {
 	return id
 }
 
-func init() {
-	intelligenceIndicators = []IntelligenceIndicators{
-		{
-			Subject:  "^.*, please add me to your LinkedIn network$",
-			Content:  "^Hi.*, I&#39;d like to join your LinkedIn network\\. LinkedIn.*, I&#39;d like to join your LinkedIn network\\. .*$",
-			From:     "invitations@linkedin.com",
-			Event:    "attempted_network_connection",
-			HitType:  models.LinkedInRequest,
-			Platform: "LINKEDIN"},
-		{
-			Subject:  "^.*, start a conversation with your new connection, .*$",
-			Content:  "^See.*connections, experience, and more LinkedIn.*has accepted your invitation\\. Let&#39;s start a conversation\\..*$",
-			From:     "invitations@linkedin.com",
-			Event:    "successful_network_connection",
-			HitType:  models.LinkedInMessage,
-			Platform: "LINKEDIN"},
-		{
-			Subject:  "^.*wants to be friends on Facebook$",
-			Content:  "^.*wants to be friends with you on Facebook\\..*Confirm request Facebook.*wants to be friends with you on Facebook.*Confirm request See all requests.*$",
-			From:     "notification@facebookmail.com",
-			Event:    "attempted_network_connection",
-			HitType:  models.FacebookRequest,
-			Platform: "FACEBOOK"},
-	}
-}
-
-
+// getTokenFromWeb prompts for OAuth flow
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	fmt.Printf("Go to the following link in your browser then type the "+
@@ -146,6 +128,7 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	return tok
 }
 
+// tokenFromFile extracts a oauth2 token from file and adds Expiry
 func tokenFromFile(file string) (*oauth2.Token, error) {
 	f, err := ioutil.ReadFile(file)
 	if err != nil {
@@ -159,41 +142,41 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	}
 
 	if token.Expiry.IsZero() {
-        gmailToken := &GmailToken{}
-        err = json.Unmarshal([]byte(f), &gmailToken)
-        if err != nil {
-            return nil, err
-        }
-        token.Expiry = time.Now().Add(time.Second * time.Duration(gmailExpiresIn))
-        saveToken(file, token)
-    }
-    return token, err
+		gmailToken := &GmailToken{}
+		err = json.Unmarshal([]byte(f), &gmailToken)
+		if err != nil {
+			return nil, err
+		}
+		token.Expiry = time.Now().Add(time.Second * time.Duration(gmailExpiresIn))
+		saveToken(file, token)
+	}
+	return token, err
 }
 
+// saveToken saves new token file
 func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", path)
+	fmt.Printf("Saving token file to: %s\n", path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		log.Fatalf("Unable to cache oauth token: %v", err)
+		log.Fatalf("Unable to save oauth token: %v", err)
 	}
 	defer f.Close()
 	json.NewEncoder(f).Encode(token)
 }
 
+// extractEmail extracts the email from the emailLine
 func extractEmail(emailLine string) string {
 	re := regexp.MustCompile(`([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)`)
 	return re.FindAllString(emailLine, 1)[0]
 }
 
+// matchFormat checks if textBody matches the regex
 func matchFormat(textBody string, regularExpressionFormat string) bool {
 	r, _ := regexp.Compile(regularExpressionFormat)
 	return r.MatchString(textBody)
 }
 
-func convertEpochMS(epochMS int64) time.Time {
-	return time.Unix(0, epochMS*int64(time.Millisecond))
-}
-
+// extractHeader extracts the relevant email header value
 func extractHeader(headers []*gmail.MessagePartHeader, header string) string {
 	result := ""
 	for _, messagePartHeader := range headers {
@@ -205,28 +188,23 @@ func extractHeader(headers []*gmail.MessagePartHeader, header string) string {
 	return result
 }
 
-func generateSha256Hash(platform string, target string, event string, subject string, snippet string) string {
-	plaintext := []string{platform, target, event, subject, snippet}
-	data := []byte(strings.Join(plaintext, ":"))
-	hash := sha256.Sum256(data)
-	encodedStr := hex.EncodeToString(hash[:])
-	return encodedStr
-}
-
-func analyzeEmail(emailMessage *gmail.Message) (IndicatorOfInterest, error) {
+// parseEmail checks if email matches indicator format and modifies socialListenerHit accordingly
+func parseEmail(emailMessage *gmail.Message, socialListenerHit *SocialListenerHit) error {
 	subject := extractHeader(emailMessage.Payload.Headers, "Subject")
 	email := extractEmail(extractHeader(emailMessage.Payload.Headers, "To"))
 	fromEmail := extractEmail(extractHeader(emailMessage.Payload.Headers, "From"))
 	content := emailMessage.Snippet
 	for _, indicator := range intelligenceIndicators {
 		if matchFormat(subject, indicator.Subject) && fromEmail == indicator.From && matchFormat(content, indicator.Content) {
-			return IndicatorOfInterest{ListenerID: listenerID, ListenerType: models.ListenerType(listenerType), HitType: indicator.HitType, Email: email, Sha256_hash: generateSha256Hash(indicator.Platform, email, indicator.Event, subject, content)}, nil
+			socialListenerHit.Email = email
+			socialListenerHit.HitType = indicator.HitType
+			return nil
 		}
 	}
-	return IndicatorOfInterest{ListenerID: 0, ListenerType: 0, HitType: 0, Email: "", Sha256_hash: ""}, errors.New("Email does not contain intelligence")
+	return errors.New("Email does not contain intelligence")
 }
 
-// Get a Gmail service client that refreshes if saved token is expired
+// getClientWithRefresh gets a Gmail service client that refreshes if saved token is expired
 func getClientWithRefresh() (*http.Client, error) {
 	b, err := ioutil.ReadFile(googleCredentialsFile)
 	if err != nil {
@@ -262,23 +240,24 @@ func getClientWithRefresh() (*http.Client, error) {
 	return client, nil
 }
 
+// initGmailGmailService initializes Gmail client service
 func initGmailService() (*gmail.Service, error) {
-    client, err := getClientWithRefresh()
-    if err != nil {
-        log.Fatalf("Unable to create client: %v", err)
-        return nil, err
-    }
+	client, err := getClientWithRefresh()
+	if err != nil {
+		log.Fatalf("Unable to create client: %v", err)
+		return nil, err
+	}
 
-    gmailService, err := gmail.New(client)
-    if err != nil {
-        log.Fatalf("Unable to create Gmail client: %v", err)
-        return nil, err
-    }
+	gmailService, err := gmail.New(client)
+	if err != nil {
+		log.Fatalf("Unable to create Gmail client: %v", err)
+		return nil, err
+	}
 
-    return gmailService, nil
+	return gmailService, nil
 }
 
-// InitGmailWatch initializes Gmail client service and authorizes with OAuth credentials
+// initGmailWatch initializes Gmail client service and authorizes with OAuth credentials
 func initGmailWatch() {
 	gmailService, err := initGmailService()
 	if err != nil {
@@ -298,12 +277,12 @@ func initGmailWatch() {
 	if err != nil {
 		log.Fatalf("Unable to retrieve watch: %v", err)
 	}
-	GmailHistoryID = r.HistoryId
+	gmailHistoryID = r.HistoryId
 
 	fmt.Printf("Successfully started watch with expiration %d and history ID %d\n", r.Expiration, r.HistoryId)
 }
 
-// LoginRoutes defines the routes for the login listener
+// SocialRoutes defines the routes for the social listener
 func SocialRoutes(r *gin.Engine) {
 	user := "me"
 
@@ -332,7 +311,7 @@ func SocialRoutes(r *gin.Engine) {
 		}
 
 		// Retrieve user history starting from previous history ID
-		r, err := gmailService.Users.History.List(user).StartHistoryId(GmailHistoryID).Do()
+		r, err := gmailService.Users.History.List(user).StartHistoryId(gmailHistoryID).Do()
 		if err != nil {
 			log.Fatalf("Unable to retrieve history: %v", err)
 		}
@@ -344,40 +323,33 @@ func SocialRoutes(r *gin.Engine) {
 				if err != nil {
 					// Does not work when email sent from same acct
 					// Require stricter checking of message origin
-					log.Fatalf("Unable to retrieve message: %v", err)
-				}
-				indicator, analysisError := analyzeEmail(messageResponse)
-				if analysisError != nil {
-					fmt.Printf("Message %s does not contain Intelligence\n", messageResponse.Id)
+					fmt.Printf("Unable to retrieve message: %v", err)
 					continue
 				}
-				jsonObj, jsonConversionErr := json.Marshal(&indicator)
-				if jsonConversionErr != nil {
-					fmt.Println(jsonConversionErr)
+				socialListenerHit := SocialListenerHit{
+					ListenerID:   convertStrEnvToInt("LISTENER_ID"),
+					ListenerType: models.ListenerType(convertStrEnvToInt("LISTENER_TYPE")),
 				}
-				loginHit := SocialListenerHit{
-					ListenerID:   listenerID,
-					ListenerType: models.ListenerType(listenerType),
-					IPAddress:    c.ClientIP(),
-					Email:        indicator.Email,
-					HitType:      indicator.HitType,
-				}
-				loginHitJSON, err := json.Marshal(loginHit)
+				err = parseEmail(messageResponse, &socialListenerHit)
 				if err != nil {
-					log.Fatalf("Unable to convert to json object: %v", err)
+					fmt.Printf("Failed to analyze email %s: %v", messageResponse.Id, err)
+					continue
 				}
-				_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginHitJSON))
+				socialListenerHitJSON, err := json.Marshal(socialListenerHit)
+				if err != nil {
+					fmt.Printf("Unable to convert to json object: %v", err)
+					continue
+				}
+				_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(socialListenerHitJSON))
 				if err != nil {
 					log.Fatalf("Unable to send to backend server: %v", err)
 				}
-				fmt.Println(string(jsonObj))
 			}
 		}
 
 		// Update history ID
-		GmailHistoryID = emailNotification.HistoryID
+		gmailHistoryID = emailNotification.HistoryID
 
-		response := SimpleAcknowledgementReponse{Message: "OK"}
-		c.JSON(http.StatusOK, response)
+		c.Status(http.StatusOK)
 	})
 }
