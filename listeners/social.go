@@ -3,6 +3,7 @@ package listeners
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,11 +26,6 @@ import (
 	"google.golang.org/api/gmail/v1"
 )
 
-type MessagesCache struct {
-	Ids    map[string]bool     `json:"ids"`
-	Hashes map[string][]string `json:"hashes"`
-}
-
 type SimpleAcknowledgementReponse struct {
 	Message string `json:"message"`
 }
@@ -51,7 +47,7 @@ type IndicatorOfInterest struct {
 	Sha256_hash  string              `json:"sha256_hash"`
 }
 
-type ListenerHit struct {
+type SocialListenerHit struct {
 	ListenerID   int                 `json:"listenerId"`
 	ListenerType models.ListenerType `json:"listenerType"`
 	IPAddress    string              `json:"ipAddress"`
@@ -68,41 +64,35 @@ type GmailToken struct {
 	TokenType    string `json: "token_type"`
 }
 
-func readMessagesCache(outputFile string) MessagesCache {
-	resultCache := MessagesCache{}
-	file, fileReadError := ioutil.ReadFile(outputFile)
-	if fileReadError != nil {
-		resultCache = MessagesCache{Ids: make(map[string]bool), Hashes: make(map[string][]string)}
-	} else {
-		readJsonError := json.Unmarshal([]byte(file), &resultCache)
-		if readJsonError != nil {
-			resultCache = MessagesCache{Ids: make(map[string]bool), Hashes: make(map[string][]string)}
-		}
-	}
-	return resultCache
+// PushNotification struct describes a simple Google Pub/Sub notification
+type PushNotification struct {
+	Message      NotificationMessage `json:"message"`
+	Subscription string              `json:"subscription"`
 }
 
-func dumpMessagesCache(messagesCache MessagesCache, outputFile string) {
-	streamArr, marshalError := json.Marshal(messagesCache)
-	if marshalError != nil {
-		fmt.Println(marshalError)
-	} else {
-		ioutil.WriteFile(outputFile, streamArr, 0644)
-	}
+// NotificationMessage struct describes a simple notification message
+type NotificationMessage struct {
+	Data        string `json:"data"`
+	MessageID   string `json:"messageId"`
+	PublishTime string `json:"publishTime"`
 }
 
+// EmailNotification describes a simple Gmail notification
+type EmailNotification struct {
+	EmailAddress string `json:"emailAddress"`
+	HistoryID    uint64 `json:"historyId"`
+}
+
+var GmailHistoryID uint64 // GmailHistoryID points to latest history ID retrieved
 var intelligenceIndicators []IntelligenceIndicators
-var messagesCacheFile string = os.Getenv("MESSAGES_CACHE_FILE")
 var companyName string = os.Getenv("COMPANY_NAME")
 var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
 var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
 var listenerID int = convertStrToInt("LISTENER_ID")
 var listenerType int = convertStrToInt("LISTENER_TYPE")
+var topicFile string = os.Getenv("GOOGLE_TOPIC")
 
-// GmailHistoryID points to latest history ID retrieved
-var GmailHistoryID uint64
-
-const gmailExpiresIn uint64 = 3
+const gmailExpiresIn uint64 = 3600
 
 func convertStrToInt(envStr string) int {
 	id, err := strconv.Atoi(os.Getenv(envStr))
@@ -273,8 +263,6 @@ func getClientWithRefresh() (*http.Client, error) {
 }
 
 func initGmailService() (*gmail.Service, error) {
-	// // b, err := ioutil.ReadFile("/run/secrets/credentials.json")
-
     client, err := getClientWithRefresh()
     if err != nil {
         log.Fatalf("Unable to create client: %v", err)
@@ -290,87 +278,106 @@ func initGmailService() (*gmail.Service, error) {
     return gmailService, nil
 }
 
+// InitGmailWatch initializes Gmail client service and authorizes with OAuth credentials
+func initGmailWatch() {
+	gmailService, err := initGmailService()
+	if err != nil {
+		log.Fatalf("Unable to create Gmail service: %v", err)
+	}
+
+	topicBytes, err := ioutil.ReadFile(topicFile)
+	if err != nil {
+		log.Fatalf("Unable to read from topicFile: %v", err)
+	}
+	topic := strings.Split(string(topicBytes), "\n")[0]
+	watchRequest := gmail.WatchRequest{
+		LabelIds:  []string{"INBOX"},
+		TopicName: topic,
+	}
+	r, err := gmailService.Users.Watch("me", &watchRequest).Do()
+	if err != nil {
+		log.Fatalf("Unable to retrieve watch: %v", err)
+	}
+	GmailHistoryID = r.HistoryId
+
+	fmt.Printf("Successfully started watch with expiration %d and history ID %d\n", r.Expiration, r.HistoryId)
+}
+
 // LoginRoutes defines the routes for the login listener
 func SocialRoutes(r *gin.Engine) {
-
 	user := "me"
 
-	r.GET("/", func(c *gin.Context) {
-		c.HTML(http.StatusOK, "login.html", gin.H{
-			"companyName": companyName,
-		})
-	})
-	r.GET("/harvest", func(c *gin.Context) {
-		srv, err := initGmailService()
-		r, err := srv.Users.Messages.List(user).Do()
+	// Initialize Gmail watch
+	initGmailWatch()
+
+	r.POST("/notifications", func(c *gin.Context) {
+		var n PushNotification
+		c.BindJSON(&n)
+		fmt.Printf("Received push notification %s at %s\n", n.Message.MessageID, n.Message.PublishTime)
+
+		// Try to decode received message
+		decoded, err := base64.StdEncoding.DecodeString(n.Message.Data)
 		if err != nil {
-			log.Fatalf("Unable to retrieve emails: %v", err)
+			log.Fatalf("Failed to decode message: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err})
+			return
 		}
-		if len(r.Messages) > 0 {
-			messagesCache := readMessagesCache(messagesCacheFile)
-			for _, message := range r.Messages {
-				cachedId := messagesCache.Ids[message.Id]
-				if cachedId == false {
-					messagesCache.Ids[message.Id] = true
-					messageResponse, messageResponseError := srv.Users.Messages.Get(user, message.Id).Do()
-					if messageResponseError != nil {
-						log.Fatalf("Unable to retrieve message: %v", messageResponseError)
-					}
-					indicator, analysisError := analyzeEmail(messageResponse)
-					if analysisError != nil {
-						fmt.Printf("Message %s does not contain Intelligence\n", message.Id)
-						continue
-					}
-					jsonObj, jsonConversionErr := json.Marshal(&indicator)
-					if jsonConversionErr != nil {
-						fmt.Println(jsonConversionErr)
-					}
-					hashes := messagesCache.Hashes[indicator.Sha256_hash]
-					// Do something here to send the intelligence object to a endpoint
-					// To discuss with the team on the action taken if a similar intelligence is found
-					if len(hashes) > 0 {
-						fmt.Println("Similar hash value found")
-					} else {
-						// Since its unique, send back to backend
-						loginHit := ListenerHit{
-							ListenerID:   listenerID,
-							ListenerType: models.ListenerType(listenerType),
-							IPAddress:    c.ClientIP(),
-							Email:        indicator.Email,
-							HitType:      indicator.HitType,
-						}
-						loginHitJSON, err := json.Marshal(loginHit)
-						if err != nil {
-							log.Fatalf("Unable to convert to json object: %v", err)
-						}
-						_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginHitJSON))
-						if err != nil {
-							log.Fatalf("Unable to send to backend server: %v", err)
-						}
-					}
-					messagesCache.Hashes[indicator.Sha256_hash] = append(hashes, message.Id)
-					fmt.Println(string(jsonObj))
+
+		emailNotification := EmailNotification{}
+		json.Unmarshal([]byte(decoded), &emailNotification)
+
+		gmailService, err := initGmailService()
+		if err != nil {
+			log.Fatalf("Unable to create Gmail service: %v", err)
+		}
+
+		// Retrieve user history starting from previous history ID
+		r, err := gmailService.Users.History.List(user).StartHistoryId(GmailHistoryID).Do()
+		if err != nil {
+			log.Fatalf("Unable to retrieve history: %v", err)
+		}
+
+		// For each history item, check if a message was added and extract attachment if it exists
+		for _, h := range r.History {
+			for _, m := range h.MessagesAdded {
+				messageResponse, err := gmailService.Users.Messages.Get(user, m.Message.Id).Do()
+				if err != nil {
+					// Does not work when email sent from same acct
+					// Require stricter checking of message origin
+					log.Fatalf("Unable to retrieve message: %v", err)
 				}
+				indicator, analysisError := analyzeEmail(messageResponse)
+				if analysisError != nil {
+					fmt.Printf("Message %s does not contain Intelligence\n", messageResponse.Id)
+					continue
+				}
+				jsonObj, jsonConversionErr := json.Marshal(&indicator)
+				if jsonConversionErr != nil {
+					fmt.Println(jsonConversionErr)
+				}
+				loginHit := SocialListenerHit{
+					ListenerID:   listenerID,
+					ListenerType: models.ListenerType(listenerType),
+					IPAddress:    c.ClientIP(),
+					Email:        indicator.Email,
+					HitType:      indicator.HitType,
+				}
+				loginHitJSON, err := json.Marshal(loginHit)
+				if err != nil {
+					log.Fatalf("Unable to convert to json object: %v", err)
+				}
+				_, err = http.Post("http://server:8080/v1/hit", "application/json", bytes.NewBuffer(loginHitJSON))
+				if err != nil {
+					log.Fatalf("Unable to send to backend server: %v", err)
+				}
+				fmt.Println(string(jsonObj))
 			}
-			dumpMessagesCache(messagesCache, messagesCacheFile)
-		} else {
-			// if no email found, do not continue any further
-			fmt.Println("No emails found.")
 		}
+
+		// Update history ID
+		GmailHistoryID = emailNotification.HistoryID
+
 		response := SimpleAcknowledgementReponse{Message: "OK"}
-		c.JSON(http.StatusOK, response)
-	})
-	r.GET("/cache", func(c *gin.Context) {
-		messagesCache := readMessagesCache(messagesCacheFile)
-		c.JSON(http.StatusOK, messagesCache)
-	})
-	r.GET("/clear_cache", func(c *gin.Context) {
-		err := os.Remove(messagesCacheFile)
-		response := SimpleAcknowledgementReponse{Message: "OK"}
-		if err != nil {
-			log.Fatalf("Unable to clear messages cache: %v", err)
-			response.Message = "FAILED"
-		}
 		c.JSON(http.StatusOK, response)
 	})
 }
