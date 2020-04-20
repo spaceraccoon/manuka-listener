@@ -59,6 +59,15 @@ type ListenerHit struct {
 	HitType      models.HitType      `json:"hitType"`
 }
 
+// GmailToken represents the fields returned from a Gmail Oauth token JSON
+type GmailToken struct {
+	AccessToken  string `json: "access_token"`
+	ExpiresIn    int    `json: "expires_in"`
+	RefreshToken string `json: "refresh_token"`
+	Scope        string `json: "scope"`
+	TokenType    string `json: "token_type"`
+}
+
 func readMessagesCache(outputFile string) MessagesCache {
 	resultCache := MessagesCache{}
 	file, fileReadError := ioutil.ReadFile(outputFile)
@@ -89,6 +98,11 @@ var googleCredentialsFile string = os.Getenv("GOOGLE_CREDENTIALS_FILE")
 var googleOauth2TokenFile string = os.Getenv("GOOGLE_OAUTH2_TOKEN_FILE")
 var listenerID int = convertStrToInt("LISTENER_ID")
 var listenerType int = convertStrToInt("LISTENER_TYPE")
+
+// GmailHistoryID points to latest history ID retrieved
+var GmailHistoryID uint64
+
+const gmailExpiresIn uint64 = 3
 
 func convertStrToInt(envStr string) int {
 	id, err := strconv.Atoi(os.Getenv(envStr))
@@ -124,14 +138,6 @@ func init() {
 	}
 }
 
-func getClient(config *oauth2.Config) *http.Client {
-	tok, err := tokenFromFile(googleOauth2TokenFile)
-	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(googleOauth2TokenFile, tok)
-	}
-	return config.Client(context.Background(), tok)
-}
 
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
@@ -151,14 +157,27 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 }
 
 func tokenFromFile(file string) (*oauth2.Token, error) {
-	f, err := os.Open(file)
+	f, err := ioutil.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
-	return tok, err
+
+	token := &oauth2.Token{}
+	err = json.Unmarshal([]byte(f), &token)
+	if err != nil {
+		return nil, err
+	}
+
+	if token.Expiry.IsZero() {
+        gmailToken := &GmailToken{}
+        err = json.Unmarshal([]byte(f), &gmailToken)
+        if err != nil {
+            return nil, err
+        }
+        token.Expiry = time.Now().Add(time.Second * time.Duration(gmailExpiresIn))
+        saveToken(file, token)
+    }
+    return token, err
 }
 
 func saveToken(path string, token *oauth2.Token) {
@@ -217,22 +236,58 @@ func analyzeEmail(emailMessage *gmail.Message) (IndicatorOfInterest, error) {
 	return IndicatorOfInterest{ListenerID: 0, ListenerType: 0, HitType: 0, Email: "", Sha256_hash: ""}, errors.New("Email does not contain intelligence")
 }
 
-func initGmailService() (*gmail.Service, error) {
-	// b, err := ioutil.ReadFile("/run/secrets/credentials.json")
+// Get a Gmail service client that refreshes if saved token is expired
+func getClientWithRefresh() (*http.Client, error) {
 	b, err := ioutil.ReadFile(googleCredentialsFile)
 	if err != nil {
 		log.Fatalf("Unable to read client secret file: %v", err)
 	}
+
 	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
 	if err != nil {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
-	client := getClient(config)
-	srv, err := gmail.New(client)
+
+	oldToken, err := tokenFromFile(googleOauth2TokenFile)
 	if err != nil {
-		log.Fatalf("Unable to retrieve Gmail client: %v", err)
+		log.Fatalf("Failed to retrieve token from file: %v", err)
+		token := getTokenFromWeb(config)
+		saveToken(googleOauth2TokenFile, token)
 	}
-	return srv, err
+
+	tokenSource := config.TokenSource(oauth2.NoContext, oldToken)
+	newToken, err := tokenSource.Token() // renews token
+	if err != nil {
+		log.Fatalf("Unable to generate new token: %v", err)
+	}
+
+	if newToken.AccessToken != oldToken.AccessToken {
+		newToken.Expiry = time.Now().Add(time.Second * time.Duration(gmailExpiresIn))
+		saveToken(googleOauth2TokenFile, newToken)
+		log.Println("Saved new token:", newToken.AccessToken) // save new access and refresh token
+	}
+
+	client := oauth2.NewClient(oauth2.NoContext, tokenSource)
+
+	return client, nil
+}
+
+func initGmailService() (*gmail.Service, error) {
+	// // b, err := ioutil.ReadFile("/run/secrets/credentials.json")
+
+    client, err := getClientWithRefresh()
+    if err != nil {
+        log.Fatalf("Unable to create client: %v", err)
+        return nil, err
+    }
+
+    gmailService, err := gmail.New(client)
+    if err != nil {
+        log.Fatalf("Unable to create Gmail client: %v", err)
+        return nil, err
+    }
+
+    return gmailService, nil
 }
 
 // LoginRoutes defines the routes for the login listener
