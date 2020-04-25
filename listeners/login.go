@@ -25,6 +25,7 @@ type LoginListenerHit struct {
 	Username     string              `json:"username"`
 	Password     string              `json:"password"`
 	HitType      models.HitType      `json:"hitType"`
+	SourceType   models.SourceType   `json:"sourceType"`
 }
 
 // LoginRoutes defines the routes for the login listener
@@ -52,6 +53,7 @@ func LoginRoutes(r *gin.Engine) {
 			Username:     login.Username,
 			Password:     login.Password,
 			HitType:      models.LoginAttempt,
+			SourceType:   models.PastebinSource,
 		}
 		loginListenerHitJSON, err := json.Marshal(loginListenerHit)
 		if err != nil {

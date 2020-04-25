@@ -161,6 +161,8 @@ github.com/spaceraccoon/manuka-server v0.0.0-20200417181512-7e26f0a62dfa h1:80in
 github.com/spaceraccoon/manuka-server v0.0.0-20200417181512-7e26f0a62dfa/go.mod h1:7ceyza/pGHiENJ2+iwLAVskIol5jdY3upN/USIjr4RQ=
 github.com/spaceraccoon/manuka-server v0.0.0-20200418063238-b5b1dccf7359 h1:f/9SqMfr7AUdcLZIsklHUqvsHIV2qmhQqb1EAXc91LQ=
 github.com/spaceraccoon/manuka-server v0.0.0-20200418063238-b5b1dccf7359/go.mod h1:7ceyza/pGHiENJ2+iwLAVskIol5jdY3upN/USIjr4RQ=
+github.com/spaceraccoon/manuka-server v0.0.0-20200420160850-61c6aaabce5f h1:vMSGC3W/bVIyHfQ6mCcOmIE5OMGcHrLD/lUrleurUcs=
+github.com/spaceraccoon/manuka-server v0.0.0-20200420160850-61c6aaabce5f/go.mod h1:7ceyza/pGHiENJ2+iwLAVskIol5jdY3upN/USIjr4RQ=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
 github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=

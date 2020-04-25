@@ -26,12 +26,11 @@ import (
 
 // IntelligenceIndicator struct defines matching templates for social email notifications
 type IntelligenceIndicator struct {
-	Subject  string         `json:"subject_re"`
-	Content  string         `json:"content_re"`
-	From     string         `json:"from_email"`
-	Event    string         `json:"event"`
-	Platform string         `json:"platform"`
-	HitType  models.HitType `json:"hitType"`
+	Subject    string            `json:"subject_re"`
+	Content    string            `json:"content_re"`
+	From       string            `json:"from_email"`
+	HitType    models.HitType    `json:"hitType"`
+	SourceType models.SourceType `json:"sourceType"`
 }
 
 // SocialListenerHit struct defines the hit data that is sent to the server
@@ -40,6 +39,7 @@ type SocialListenerHit struct {
 	ListenerType models.ListenerType `json:"listenerType"`
 	Email        string              `json:"email"`
 	HitType      models.HitType      `json:"hitType"`
+	SourceType   models.SourceType   `json:"sourceType"`
 }
 
 // GmailToken represents the fields returned from a Gmail Oauth token JSON
@@ -79,26 +79,26 @@ const gmailExpiresIn uint64 = 3600
 
 var intelligenceIndicators []IntelligenceIndicator = []IntelligenceIndicator{
 	{
-		Subject:  "^.*, please add me to your LinkedIn network$",
-		Content:  "^Hi.*, I&#39;d like to join your LinkedIn network\\. LinkedIn.*, I&#39;d like to join your LinkedIn network\\. .*$",
-		From:     "invitations@linkedin.com",
-		Event:    "attempted_network_connection",
-		HitType:  models.LinkedInRequest,
-		Platform: "LINKEDIN"},
+		Subject:    "^.*, please add me to your LinkedIn network$",
+		Content:    "^Hi.*, I&#39;d like to join your LinkedIn network\\. LinkedIn.*, I&#39;d like to join your LinkedIn network\\. .*$",
+		From:       "invitations@linkedin.com",
+		HitType:    models.LinkedInRequest,
+		SourceType: models.LinkedInSource,
+	},
 	{
-		Subject:  "^.*, start a conversation with your new connection, .*$",
-		Content:  "^See.*connections, experience, and more LinkedIn.*has accepted your invitation\\. Let&#39;s start a conversation\\..*$",
-		From:     "invitations@linkedin.com",
-		Event:    "successful_network_connection",
-		HitType:  models.LinkedInMessage,
-		Platform: "LINKEDIN"},
+		Subject:    "^.*, start a conversation with your new connection, .*$",
+		Content:    "^See.*connections, experience, and more LinkedIn.*has accepted your invitation\\. Let&#39;s start a conversation\\..*$",
+		From:       "invitations@linkedin.com",
+		HitType:    models.LinkedInConnect,
+		SourceType: models.LinkedInSource,
+	},
 	{
-		Subject:  "^.*wants to be friends on Facebook$",
-		Content:  "^.*wants to be friends with you on Facebook\\..*Confirm request Facebook.*wants to be friends with you on Facebook.*Confirm request See all requests.*$",
-		From:     "notification@facebookmail.com",
-		Event:    "attempted_network_connection",
-		HitType:  models.FacebookRequest,
-		Platform: "FACEBOOK"},
+		Subject:    "^.*wants to be friends on Facebook$",
+		Content:    "^.*wants to be friends with you on Facebook\\..*Confirm request Facebook.*wants to be friends with you on Facebook.*Confirm request See all requests.*$",
+		From:       "notification@facebookmail.com",
+		HitType:    models.FacebookRequest,
+		SourceType: models.FacebookSource,
+	},
 }
 
 // convertStrEnvToInt converts the envStr to an int
@@ -193,11 +193,12 @@ func parseEmail(emailMessage *gmail.Message, socialListenerHit *SocialListenerHi
 	subject := extractHeader(emailMessage.Payload.Headers, "Subject")
 	email := extractEmail(extractHeader(emailMessage.Payload.Headers, "To"))
 	fromEmail := extractEmail(extractHeader(emailMessage.Payload.Headers, "From"))
-	content := emailMessage.Snippet
+	// content := emailMessage.Snippet
 	for _, indicator := range intelligenceIndicators {
-		if matchFormat(subject, indicator.Subject) && fromEmail == indicator.From && matchFormat(content, indicator.Content) {
+		if matchFormat(subject, indicator.Subject) && fromEmail == indicator.From {
 			socialListenerHit.Email = email
 			socialListenerHit.HitType = indicator.HitType
+			socialListenerHit.SourceType = indicator.SourceType
 			return nil
 		}
 	}
@@ -316,13 +317,11 @@ func SocialRoutes(r *gin.Engine) {
 			log.Fatalf("Unable to retrieve history: %v", err)
 		}
 
-		// For each history item, check if a message was added and extract attachment if it exists
+		// For each history item, check if a message was added and parse social listener hits
 		for _, h := range r.History {
 			for _, m := range h.MessagesAdded {
 				messageResponse, err := gmailService.Users.Messages.Get(user, m.Message.Id).Do()
 				if err != nil {
-					// Does not work when email sent from same acct
-					// Require stricter checking of message origin
 					fmt.Printf("Unable to retrieve message: %v", err)
 					continue
 				}
