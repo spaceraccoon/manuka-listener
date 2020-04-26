@@ -13,8 +13,8 @@ RUN go build
 FROM alpine:latest
 
 # Copy build
-COPY --from=build /manuka-listener/templates ./templates
 COPY --from=build /manuka-listener/manuka-listener .
+COPY --from=build /manuka-listener/templates ./templates
 
 # Run server
 CMD "./manuka-listener"
